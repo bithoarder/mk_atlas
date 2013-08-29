@@ -44,17 +44,17 @@ func TrimImage(src *image.RGBA) (dst *image.RGBA) {
 
 	//fmt.Printf("TrimImage %p %#v\n", src.Pix, src.Bounds())
 
-	for trim.Max.X > trim.Min.X && ImageMaxAlpha(src.SubImage(image.Rect(trim.Max.X-1, trim.Min.Y, trim.Max.X, trim.Max.Y))) == 0 {
+	for trim.Max.X-trim.Min.X > 1 && ImageMaxAlpha(src.SubImage(image.Rect(trim.Max.X-1, trim.Min.Y, trim.Max.X, trim.Max.Y))) == 0 {
 		trim.Max.X -= 1
 	}
-	for trim.Min.X < trim.Max.X && ImageMaxAlpha(src.SubImage(image.Rect(trim.Min.X, trim.Min.Y, trim.Min.X+1, trim.Max.Y))) == 0 {
+	for trim.Max.X-trim.Min.X > 1 && ImageMaxAlpha(src.SubImage(image.Rect(trim.Min.X, trim.Min.Y, trim.Min.X+1, trim.Max.Y))) == 0 {
 		trim.Min.X += 1
 	}
 
-	for trim.Max.Y > trim.Min.Y && ImageMaxAlpha(src.SubImage(image.Rect(trim.Min.X, trim.Max.Y-1, trim.Max.X, trim.Max.Y))) == 0 {
+	for trim.Max.Y-trim.Min.Y > 1 && ImageMaxAlpha(src.SubImage(image.Rect(trim.Min.X, trim.Max.Y-1, trim.Max.X, trim.Max.Y))) == 0 {
 		trim.Max.Y -= 1
 	}
-	for trim.Min.Y < trim.Max.Y && ImageMaxAlpha(src.SubImage(image.Rect(trim.Min.X, trim.Min.Y, trim.Max.X, trim.Min.Y+1))) == 0 {
+	for trim.Max.Y-trim.Min.Y > 1 && ImageMaxAlpha(src.SubImage(image.Rect(trim.Min.X, trim.Min.Y, trim.Max.X, trim.Min.Y+1))) == 0 {
 		trim.Min.Y += 1
 	}
 
