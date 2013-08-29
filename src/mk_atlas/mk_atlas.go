@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime/pprof"
 	"sort"
+	"strings"
 )
 
 //////////////////////////////////////////////////////////////////////////////
@@ -240,7 +243,7 @@ func (a *Atlas) PackImages2(atlasSize image.Point) (err error) {
 	var bestScore int64
 	var bestSeed uint32
 
-	for i := 0; i < 25000; i++ {
+	for i := 0; i < 1000; i++ {
 		score := a.PackImages(atlasSize, &SimpleRand{uint32(i)})
 		if score < 0 {
 			//fmt.Printf("%d: Failed to fit all images\n", i)
@@ -264,7 +267,7 @@ func (a *Atlas) PackImages2(atlasSize image.Point) (err error) {
 	return nil
 }
 
-func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point) (err error) {
+func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point, drawpadding bool) (err error) {
 	dstimg := image.NewRGBA(image.Rect(0, 0, atlasSize.X, atlasSize.Y))
 
 	// fill with solid color
@@ -272,18 +275,18 @@ func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point) (err error) {
 		for x := 0; x < atlasSize.X; x++ {
 			dstimg.Pix[x*4+y*dstimg.Stride+0] = 0
 			dstimg.Pix[x*4+y*dstimg.Stride+1] = 0
-			dstimg.Pix[x*4+y*dstimg.Stride+2] = 128
-			dstimg.Pix[x*4+y*dstimg.Stride+3] = 255
+			dstimg.Pix[x*4+y*dstimg.Stride+2] = 0
+			dstimg.Pix[x*4+y*dstimg.Stride+3] = 0
 		}
 	}
 
 	for i := range a.Images {
 		img := a.Images[i]
-		//fmt.Println(img.AtlasPos)
-		draw.Draw(dstimg,
-			//img.Image.Rect.Add(img.AtlasPos),
-			image.Rect(img.AtlasPos.X, img.AtlasPos.Y, img.AtlasPos.X+img.Image.Rect.Dx(), img.AtlasPos.Y+img.Image.Rect.Dy()),
-			img.Image, img.Image.Rect.Min, draw.Src)
+		dstrect := image.Rect(img.AtlasPos.X, img.AtlasPos.Y, img.AtlasPos.X+img.Image.Rect.Dx(), img.AtlasPos.Y+img.Image.Rect.Dy())
+		if drawpadding {
+			draw.Draw(dstimg, dstrect.Inset(-1), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.ZP, draw.Src)
+		}
+		draw.Draw(dstimg, dstrect, img.Image, img.Image.Rect.Min, draw.Src)
 	}
 
 	f, err := os.Create(path)
@@ -300,9 +303,57 @@ func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point) (err error) {
 	return nil
 }
 
+type Dimension struct {
+	Width, Height int
+}
+
+type Point struct {
+	X, Y int
+}
+
+type ImageMeta struct {
+	Position     Point
+	Size         Dimension
+	OriginalSize Dimension
+	Offset       Point
+}
+
+type AtlasMeta struct {
+	Size   Dimension
+	Images map[string]ImageMeta
+}
+
+func (a *Atlas) SaveAtlasMeta(path string, atlasSize image.Point) (err error) {
+	meta := AtlasMeta{Size: Dimension{atlasSize.X, atlasSize.Y}, Images: make(map[string]ImageMeta)}
+
+	for _, img := range a.Images {
+		meta.Images[img.Path] = ImageMeta{
+			Position:     Point{img.AtlasPos.X, img.AtlasPos.Y},
+			Size:         Dimension{img.Image.Bounds().Dx(), img.Image.Bounds().Dy()},
+			OriginalSize: Dimension{img.OrgBounds.Dx(), img.OrgBounds.Dy()},
+			Offset:       Point{img.Image.Bounds().Min.X, img.Image.Bounds().Min.Y},
+		}
+	}
+
+	var f *os.File
+	if f, err = os.Create(path); err == nil {
+		defer f.Close()
+		var body []byte
+		if body, err = json.MarshalIndent(meta, "", "  "); err == nil {
+			_, err = f.Write(body)
+		}
+	}
+
+	return err
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+var atlaswidth = flag.Int("width", 1024, "width of generated atlas (default 1024)")
+var atlasheight = flag.Int("height", 1024, "height of generated atlas (default 1024)")
+var atlasfilename = flag.String("out", "atlas.png", "name of generated atlas (default atlas.png)")
+var drawpadding = flag.Bool("drawpadding", false, "draw padding around images (debug feature)")
 
 func main() {
 	flag.Parse()
@@ -316,6 +367,11 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
+	if *atlasheight <= 1 || *atlaswidth <= 1 {
+		fmt.Println("Invalid width or height")
+		os.Exit(1)
+	}
+
 	atlas := NewAtlas()
 
 	for _, arg := range flag.Args() {
@@ -325,13 +381,19 @@ func main() {
 		}
 	}
 
-	altasSize := image.Pt(1024, 1024)
+	altasSize := image.Pt(*atlaswidth, *atlasheight)
+
 	err := atlas.PackImages2(altasSize)
 	if err != nil {
 		panic(err)
 	}
 
-	err = atlas.SaveAtlasImage("/tmp/test.png", altasSize)
+	err = atlas.SaveAtlasImage(*atlasfilename, altasSize, *drawpadding)
+	if err != nil {
+		panic(err)
+	}
+
+	err = atlas.SaveAtlasMeta(strings.TrimSuffix(*atlasfilename, ".png")+".json", altasSize)
 	if err != nil {
 		panic(err)
 	}
