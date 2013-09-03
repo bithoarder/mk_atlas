@@ -15,6 +15,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"strings"
+	"text/template"
 )
 
 //////////////////////////////////////////////////////////////////////////////
@@ -303,6 +304,8 @@ func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point, drawpadding b
 	return nil
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
 type Dimension struct {
 	Width, Height int
 }
@@ -323,17 +326,26 @@ type AtlasMeta struct {
 	Images map[string]ImageMeta
 }
 
-func (a *Atlas) SaveAtlasMeta(path string, atlasSize image.Point) (err error) {
-	meta := AtlasMeta{Size: Dimension{atlasSize.X, atlasSize.Y}, Images: make(map[string]ImageMeta)}
+func (a *Atlas) AtlasMeta(strip int, atlasSize image.Point) (meta AtlasMeta) {
+	meta = AtlasMeta{Size: Dimension{atlasSize.X, atlasSize.Y}, Images: make(map[string]ImageMeta)}
 
 	for _, img := range a.Images {
-		meta.Images[img.Path] = ImageMeta{
+		path := filepath.Join(strings.Split(img.Path, string(filepath.Separator))[strip:]...)
+		meta.Images[path] = ImageMeta{
 			Position:     Point{img.AtlasPos.X, img.AtlasPos.Y},
 			Size:         Dimension{img.Image.Bounds().Dx(), img.Image.Bounds().Dy()},
 			OriginalSize: Dimension{img.OrgBounds.Dx(), img.OrgBounds.Dy()},
 			Offset:       Point{img.Image.Bounds().Min.X, img.Image.Bounds().Min.Y},
 		}
 	}
+
+	return
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+func (a *Atlas) SaveAtlasMeta(path string, strip int, atlasSize image.Point) (err error) {
+	meta := a.AtlasMeta(strip, atlasSize)
 
 	var f *os.File
 	if f, err = os.Create(path); err == nil {
@@ -349,11 +361,116 @@ func (a *Atlas) SaveAtlasMeta(path string, atlasSize image.Point) (err error) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+func PathAsASVarName(path string) string {
+	//r := []rune(filepath.Base(path))
+	r := []rune(path)
+	for i := 0; i < len(r); i++ {
+		if !((r[i] >= 'A' && r[i] <= 'Z') || (r[i] >= 'a' && r[i] <= 'z') || (r[i] >= '0' && r[i] <= '9')) {
+			r[i] = '_'
+		}
+	}
+	return string(r)
+}
+
+func CleanASPath(path string) string {
+	return strings.Replace(path, "\\", "/", -1)
+}
+
+var actionScriptTemplate = template.Must(template.New("as3_template").Funcs(template.FuncMap{"PathAsASVarName": PathAsASVarName, "CleanASPath": CleanASPath}).Parse(`
+{{$meta:=.meta}}
+package {{.package}}
+{
+	public class {{.name}}
+	{
+		public static const width:uint = {{.meta.Size.Width}};
+		public static const height:uint = {{.meta.Size.Height}};
+
+		{{range $path,$image := .meta.Images}}
+		public static const {{PathAsASVarName $path}}:AtlasImageMeta = new AtlasImageMeta({{/*
+			*/}}{{$image.Position.X}}, {{$image.Position.Y}}, {{/*
+			*/}}{{$image.Size.Width}}, {{$image.Size.Height}}, {{/*
+			*/}}{{$image.OriginalSize.Width}}, {{$image.OriginalSize.Height}}, {{/*
+			*/}}{{$image.Offset.X}}, {{$image.Offset.Y}}, {{/*
+			*/}}{{$image.Position.X}}.0/{{$meta.Size.Width}}.0, {{$image.Position.Y}}.0/{{$meta.Size.Height}}.0, {{/*
+			*/}}({{$image.Position.X}}.0+{{$image.Size.Width}}.0)/{{$meta.Size.Width}}.0, ({{$image.Position.Y}}.0+{{$image.Size.Height}}.0)/{{$meta.Size.Height}}.0 {{/*
+			*/}});{{end}}
+
+		public static const images:Object = {
+			{{range $path,$image := .meta.Images}}
+			"{{CleanASPath $path}}": {{PathAsASVarName $path}},{{end}}
+			"dummy": null // find a more elegant way to fix the trailing ,
+		};
+	}
+}
+`))
+
+var actionScriptMetaClassTemplate = template.Must(template.New("as3_meta_template").Parse(`
+package {{.package}}
+{
+	public class AtlasImageMeta
+	{
+		public var x:uint, y:uint, width:uint, height:uint, orgwidth:uint, orgheight:uint, offx:uint, offy:uint;
+		public var u0:Number, v0:Number, u1:Number, v1:Number;
+		public function AtlasImageMeta(x:uint, y:uint, width:uint, height:uint, orgwidth:uint, orgheight:uint, offx:uint, offy:uint, u0:Number, v0:Number, u1:Number, v1:Number)
+		{
+			this.x = x;
+			this.y = y;
+			this.width = width;
+			this.height = height;
+			this.orgwidth = orgwidth;
+			this.orgheight = orgheight;
+			this.offx = offx;
+			this.offy = offy;
+			this.u0 = u0;
+			this.v0 = v0;
+			this.u1 = u1;
+			this.v1 = v1;
+		}
+	}
+}
+`))
+
+func (a *Atlas) SaveAtlasMetaAsActionScript(path string, name string, strip int, atlasSize image.Point) (err error) {
+	meta := a.AtlasMeta(strip, atlasSize)
+
+	// todo: escape " and \ in path keys.
+
+	nameparts := strings.Split(name, ".")
+
+	var f *os.File
+	if f, err = os.Create(path); err == nil {
+		defer f.Close()
+		err = actionScriptTemplate.Execute(f, map[string]interface{}{
+			"package": strings.Join(nameparts[:len(nameparts)-1], "."),
+			"name":    nameparts[len(nameparts)-1],
+			"meta":    meta,
+		})
+	}
+
+	if err == nil {
+		if f, err = os.Create(filepath.Join(filepath.Dir(path), "AtlasImageMeta.as")); err == nil {
+			defer f.Close()
+			err = actionScriptMetaClassTemplate.Execute(f, map[string]interface{}{
+				"package": strings.Join(nameparts[:len(nameparts)-1], "."),
+				"meta":    meta,
+			})
+		}
+	}
+
+	return err
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 var atlaswidth = flag.Int("width", 1024, "width of generated atlas (default 1024)")
 var atlasheight = flag.Int("height", 1024, "height of generated atlas (default 1024)")
 var atlasfilename = flag.String("out", "atlas.png", "name of generated atlas (default atlas.png)")
 var drawpadding = flag.Bool("drawpadding", false, "draw padding around images (debug feature)")
+var jsonmeta = flag.String("json", "", "save atlas meta as json")
+var as3meta = flag.String("as3", "", "save atlas meta as actionscript")
+var as3name = flag.String("as3name", "Atlas", "package and class name of actionscript object (default Atlas)")
+var strip = flag.Int("strip", 0, "number of path elements to strip")
 
 func main() {
 	flag.Parse()
@@ -393,9 +510,19 @@ func main() {
 		panic(err)
 	}
 
-	err = atlas.SaveAtlasMeta(strings.TrimSuffix(*atlasfilename, ".png")+".json", altasSize)
-	if err != nil {
-		panic(err)
+	//err = atlas.SaveAtlasMeta(strings.TrimSuffix(*atlasfilename, ".png")+".json", altasSize)
+	if *jsonmeta != "" {
+		err = atlas.SaveAtlasMeta(*jsonmeta, *strip, altasSize)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	if *as3meta != "" {
+		err = atlas.SaveAtlasMetaAsActionScript(*as3meta, *as3name, *strip, altasSize)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
