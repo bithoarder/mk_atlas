@@ -84,23 +84,6 @@ func (i *AtlasImage) ManhattenSize() int {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-type AtlasImageAreaSorter []AtlasImage
-
-func (i AtlasImageAreaSorter) Len() int {
-	return len(i)
-}
-
-func (i AtlasImageAreaSorter) Less(a, b int) bool {
-	//return i[a].PixelArea() < i[b].PixelArea()
-	return i[a].ManhattenSize() < i[b].ManhattenSize()
-}
-
-func (i AtlasImageAreaSorter) Swap(a, b int) {
-	i[a], i[b] = i[b], i[a]
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
 type Atlas struct {
 	Images []AtlasImage
 }
@@ -158,111 +141,99 @@ type node struct {
 	Used        bool
 }
 
-type SimpleRand struct {
-	Seed uint32
+type nodeCandidate struct {
+	Candidate *node
+	Score     int
 }
 
-func (r *SimpleRand) Get() int {
-	r.Seed = (r.Seed << 1) + 1
-	if int32(r.Seed) < 0 {
-		r.Seed ^= 0x88888eef
-	}
-	return int(r.Seed)
-}
-
-// http://www.blackpawn.com/texts/lightmaps/default.html
-func (n *node) Insert(size image.Point, rnd *SimpleRand) (r *image.Rectangle) {
-	//fmt.Printf("Insert %#v %#v %#v\n", size, n.Rect, n.Used)
-	if n.Left != nil {
-		if rnd.Get() < 0x40000000 {
-			r = n.Left.Insert(size, rnd)
-			if r == nil {
-				r = n.Right.Insert(size, rnd)
-			}
+func (n *node) FindInsertCandidates(size image.Point, candidates chan nodeCandidate) {
+	if size.X <= n.Rect.Dx() && size.Y <= n.Rect.Dy() {
+		if n.Left != nil {
+			n.Left.FindInsertCandidates(size, candidates)
+			n.Right.FindInsertCandidates(size, candidates)
 		} else {
-			r = n.Right.Insert(size, rnd)
-			if r == nil {
-				r = n.Left.Insert(size, rnd)
-			}
-		}
-	} else {
-		if !n.Used {
-			ds := n.Rect.Size().Sub(size)
-			if ds.X >= 0 && ds.Y >= 0 {
-				n.Used = true
-				if ds.X == 0 && ds.Y == 0 {
-					//r = image.Rect(n.Rect.Min.X, n.Rect.Min.Y, n.Rect.Min.X+size.X, n.Rect.Min.Y+size.Y)
-					r = &n.Rect
+			if !n.Used {
+				ds := n.Rect.Size().Sub(size)
+				if ds.X >= ds.Y {
+					candidates <- nodeCandidate{n, ds.Y}
 				} else {
-					if ds.X >= ds.Y {
-						n.Left = &node{Rect: image.Rect(n.Rect.Min.X, n.Rect.Min.Y, n.Rect.Min.X+size.X, n.Rect.Max.Y)}
-						n.Right = &node{Rect: image.Rect(n.Rect.Min.X+size.X, n.Rect.Min.Y, n.Rect.Max.X, n.Rect.Max.Y)}
-					} else {
-						n.Left = &node{Rect: image.Rect(n.Rect.Min.X, n.Rect.Min.Y, n.Rect.Max.X, n.Rect.Min.Y+size.Y)}
-						n.Right = &node{Rect: image.Rect(n.Rect.Min.X, n.Rect.Min.Y+size.Y, n.Rect.Max.X, n.Rect.Max.Y)}
-					}
-					r = n.Left.Insert(size, rnd)
+					candidates <- nodeCandidate{n, ds.X}
 				}
 			}
 		}
 	}
-	return
 }
 
-func (n *node) Score() (score int64) {
-	if !n.Used {
-		score += int64(n.Rect.Dx()*n.Rect.Dy()) * int64(n.Rect.Dx()*n.Rect.Dy())
+func (n *node) Insert(size image.Point) image.Rectangle {
+	if n.Used {
+		panic("!")
 	}
-	if n.Left != nil {
-		score += n.Left.Score()
+
+	ds := n.Rect.Size().Sub(size)
+	if ds.X < 0 || ds.Y < 0 {
+		panic("!")
+	} else {
+		n.Used = true
+		if ds.X == 0 && ds.Y == 0 {
+			return n.Rect
+		} else {
+			if ds.X >= ds.Y {
+				n.Left = &node{Rect: image.Rect(n.Rect.Min.X, n.Rect.Min.Y, n.Rect.Min.X+size.X, n.Rect.Max.Y)}
+				n.Right = &node{Rect: image.Rect(n.Rect.Min.X+size.X, n.Rect.Min.Y, n.Rect.Max.X, n.Rect.Max.Y)}
+			} else {
+				n.Left = &node{Rect: image.Rect(n.Rect.Min.X, n.Rect.Min.Y, n.Rect.Max.X, n.Rect.Min.Y+size.Y)}
+				n.Right = &node{Rect: image.Rect(n.Rect.Min.X, n.Rect.Min.Y+size.Y, n.Rect.Max.X, n.Rect.Max.Y)}
+			}
+			return n.Left.Insert(size)
+		}
 	}
-	if n.Right != nil {
-		score += n.Right.Score()
-	}
-	return
 }
 
-func (a *Atlas) PackImages(atlasSize image.Point, rnd *SimpleRand) (score int64) {
+func (a *Atlas) PackImages(atlasSize image.Point) (err error) {
+	_ = sort.Sort
+
+	images := make([]*AtlasImage, len(a.Images), len(a.Images))
+	for i := 0; i < len(a.Images); i++ {
+		images[i] = &a.Images[i]
+	}
+
 	root := node{Rect: image.Rect(1, 1, atlasSize.X, atlasSize.Y)}
 
-	for i := range a.Images {
-		img := &a.Images[i]
-		r := root.Insert(img.Image.Bounds().Size().Add(image.Pt(1, 1)), rnd)
-		//fmt.Printf("%dx%d @ %d,%d : %s\n", img.Image.Bounds().Dx(), img.Image.Bounds().Dy(), r.Min.X, r.Min.Y, img.Path)
-		if r == nil {
-			return -1
-		}
-		img.AtlasPos = r.Min
-	}
+	for len(images) > 0 {
+		fmt.Printf("%d images left...\n", len(images))
 
-	return root.Score()
-}
+		var bestCandidate nodeCandidate
+		bestImage := -1
 
-func (a *Atlas) PackImages2(atlasSize image.Point) (err error) {
-	sort.Sort(sort.Reverse(AtlasImageAreaSorter(a.Images)))
+		for i := 0; i < len(images); i++ {
+			candidates := make(chan nodeCandidate, 1000)
+			go func() {
+				root.FindInsertCandidates(images[i].Image.Bounds().Size().Add(image.Pt(1, 1)), candidates)
+				close(candidates)
+			}()
 
-	var bestScore int64
-	var bestSeed uint32
-
-	for i := 0; i < 1000; i++ {
-		score := a.PackImages(atlasSize, &SimpleRand{uint32(i)})
-		if score < 0 {
-			//fmt.Printf("%d: Failed to fit all images\n", i)
-		} else {
-			if score > bestScore {
-				fmt.Printf("%d: %d\n", i, score)
-				bestScore = score
-				bestSeed = uint32(i)
+			for {
+				candidate, ok := <-candidates
+				if !ok {
+					break
+				}
+				if bestImage < 0 || candidate.Score < bestCandidate.Score {
+					//fmt.Printf("  -> %d %v\n", i, candidate)
+					bestImage = i
+					bestCandidate = candidate
+				}
 			}
 		}
-	}
 
-	if bestSeed == 0 {
-		return fmt.Errorf("Failed to fit all images")
-	}
+		if bestImage < 0 {
+			return fmt.Errorf("Failed to fit all images")
+		}
 
-	if a.PackImages(atlasSize, &SimpleRand{bestSeed}) != bestScore {
-		return fmt.Errorf("packing was not deterministic!")
+		r := bestCandidate.Candidate.Insert(images[bestImage].Image.Bounds().Size().Add(image.Pt(1, 1)))
+		images[bestImage].AtlasPos = r.Min
+
+		images[bestImage] = images[len(images)-1]
+		images = images[0 : len(images)-1]
 	}
 
 	return nil
@@ -272,12 +243,16 @@ func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point, drawpadding b
 	dstimg := image.NewRGBA(image.Rect(0, 0, atlasSize.X, atlasSize.Y))
 
 	// fill with solid color
+	var fillRed, fillGreen, fillBlue, fillAlpha uint8 = 0, 0, 0, 0
+	if drawpadding {
+		fillRed, fillAlpha = 255, 255
+	}
 	for y := 0; y < atlasSize.Y; y++ {
 		for x := 0; x < atlasSize.X; x++ {
-			dstimg.Pix[x*4+y*dstimg.Stride+0] = 0
-			dstimg.Pix[x*4+y*dstimg.Stride+1] = 0
-			dstimg.Pix[x*4+y*dstimg.Stride+2] = 0
-			dstimg.Pix[x*4+y*dstimg.Stride+3] = 0
+			dstimg.Pix[x*4+y*dstimg.Stride+0] = fillRed
+			dstimg.Pix[x*4+y*dstimg.Stride+1] = fillGreen
+			dstimg.Pix[x*4+y*dstimg.Stride+2] = fillBlue
+			dstimg.Pix[x*4+y*dstimg.Stride+3] = fillAlpha
 		}
 	}
 
@@ -285,7 +260,8 @@ func (a *Atlas) SaveAtlasImage(path string, atlasSize image.Point, drawpadding b
 		img := a.Images[i]
 		dstrect := image.Rect(img.AtlasPos.X, img.AtlasPos.Y, img.AtlasPos.X+img.Image.Rect.Dx(), img.AtlasPos.Y+img.Image.Rect.Dy())
 		if drawpadding {
-			draw.Draw(dstimg, dstrect.Inset(-1), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.ZP, draw.Src)
+			//draw.Draw(dstimg, dstrect.Inset(-1), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.ZP, draw.Src)
+			draw.Draw(dstimg, dstrect.Inset(-1), image.NewUniform(color.RGBA{0, 0, 0, 0}), image.ZP, draw.Src)
 		}
 		draw.Draw(dstimg, dstrect, img.Image, img.Image.Rect.Min, draw.Src)
 	}
@@ -500,10 +476,12 @@ func main() {
 
 	altasSize := image.Pt(*atlaswidth, *atlasheight)
 
-	err := atlas.PackImages2(altasSize)
+	err := atlas.PackImages(altasSize)
 	if err != nil {
 		panic(err)
 	}
+
+	fmt.Printf("Done, writing %s...\n", *atlasfilename)
 
 	err = atlas.SaveAtlasImage(*atlasfilename, altasSize, *drawpadding)
 	if err != nil {
